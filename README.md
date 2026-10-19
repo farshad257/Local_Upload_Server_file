@@ -1,0 +1,274 @@
+# Local Upload Server
+
+A lightweight, asynchronous local HTTP server that receives files over
+`multipart/form-data` and saves them to a local directory. Incoming file
+data is read and written incrementally in chunks of up to **1 MiB
+(1,048,576 bytes)**, avoiding the need to load an entire file into
+memory at once.
+
+This project is useful for local development and testing upload
+workflows when a remote upload endpoint or production server is
+unavailable.
+
+## Features
+
+-   **Local HTTP endpoint:** accepts uploads at `POST /upload`.
+-   **Incremental file I/O:** reads each incoming file in chunks of up
+    to 1 MiB and writes those chunks to one output file.
+-   **Asynchronous I/O:** uses `aiohttp` and `aiofiles` for asynchronous
+    request handling and file operations.
+-   **Configurable file-size limit:** sets a 5 GiB limit in the
+    application configuration and checks the size while writing.
+-   **Request rate limiting:** allows up to 5 upload requests per
+    60-second period.
+-   **Collision-resistant filenames:** prefixes stored filenames with a
+    UUID to reduce the chance of overwriting existing uploads.
+-   **Partial-file cleanup:** attempts to remove an incomplete output
+    file if an upload fails.
+-   **JSON response:** reports each uploaded file's original name,
+    stored name, size, chunk count, chunk size, and storage path.
+
+## How it works
+
+1.  The server listens on `127.0.0.1:8080`.
+2.  A client sends one or more files to `POST /upload` as
+    `multipart/form-data`.
+3.  The server applies its request rate limiter, then reads the
+    multipart request.
+4.  For each uploaded file, it removes any directory components from the
+    supplied filename and creates a UUID-prefixed storage name.
+5.  The file is read in chunks of up to 1 MiB. Each chunk is written to
+    the destination file before the next chunk is read.
+6.  If writing fails or the file exceeds the configured limit, the
+    server attempts to delete the partial output file and returns an
+    HTTP error.
+7.  On success, the server returns a JSON response describing the saved
+    file or files.
+
+**Important:** the chunks are a way to stream data to disk; they are not
+saved as separate 1 MiB files. The result is one complete file per
+upload. In the current implementation, chunks within a file and files in
+a single multipart request are handled sequentially; this is not a
+parallel or resumable upload system.
+
+## Requirements
+
+-   Python 3.10 or newer is recommended.
+-   The Python packages listed below.
+
+## Installation
+
+Clone or download this repository, then open a terminal in the project
+directory.
+
+``` bash
+python -m venv .venv
+```
+
+Activate the virtual environment:
+
+**Windows (PowerShell)**
+
+``` powershell
+.venv\Scripts\Activate.ps1
+```
+
+**Linux / macOS**
+
+``` bash
+source .venv/bin/activate
+```
+
+Install the dependencies:
+
+``` bash
+python -m pip install aiohttp aiofiles aiolimiter
+```
+
+## Run the server
+
+Save the server script as `Local_Upload_Server_File.py` (or use its
+existing filename), then run:
+
+``` bash
+python Local_Upload_Server_File.py
+```
+
+The startup output displays the endpoint and upload directory. By
+default:
+
+-   **Endpoint:** `http://127.0.0.1:8080/upload`
+-   **Upload directory:** `uploads/` beside the Python script
+
+The `uploads/` directory is created automatically if it does not already
+exist.
+
+Stop the server with `Ctrl+C`.
+
+## Upload a file
+
+### Using cURL
+
+Run this command in a second terminal, replacing `/path/to/file.zip`
+with the path to your file:
+
+``` bash
+curl -X POST \
+  -F "file=@/path/to/file.zip" \
+  http://127.0.0.1:8080/upload
+```
+
+**Windows PowerShell:** use `curl.exe` if `curl` resolves to a
+PowerShell alias.
+
+``` powershell
+curl.exe -X POST -F "file=@C:\path\to\file.zip" http://127.0.0.1:8080/upload
+```
+
+### Using Python
+
+Install `requests` if needed:
+
+``` bash
+python -m pip install requests
+```
+
+Then run:
+
+``` python
+import requests
+
+url = "http://127.0.0.1:8080/upload"
+
+with open("file.zip", "rb") as file_obj:
+    response = requests.post(
+        url,
+        files={"file": ("file.zip", file_obj)},
+        timeout=None,
+    )
+
+print("HTTP status:", response.status_code)
+print(response.text)
+response.raise_for_status()
+```
+
+The server expects a `multipart/form-data` request. Ordinary form fields
+without a filename are ignored. A request may contain multiple file
+parts.
+
+## Example success response
+
+The values below are illustrative; actual filenames, sizes, and chunk
+counts depend on the uploaded file.
+
+``` json
+{
+  "status": "success",
+  "message": "File(s) saved locally.",
+  "files": [
+    {
+      "original_filename": "file.zip",
+      "stored_filename": "8f6b2d0f7f7c4f4e8c9d4e9c1a2b3c4d_file.zip",
+      "size_bytes": 2500000,
+      "chunks_written": 3,
+      "chunk_size_bytes": 1048576,
+      "storage_path": "/path/to/project/uploads/8f6b2d0f7f7c4f4e8c9d4e9c1a2b3c4d_file.zip"
+    }
+  ]
+}
+```
+
+The stored filename is generated by the server. `chunks_written` is the
+number of chunks written to disk, not the number of separate files
+created.
+
+## Configuration
+
+The main settings are defined near the top of the Python script:
+
+  ------------------------------------------------------------------------
+  Setting                                    Default Purpose
+  --------------------- ---------------------------- ---------------------
+  `BASE_DIR`                Directory containing the Base path for local
+                                              script storage
+
+  `UPLOAD_DIR`                `BASE_DIR / "uploads"` Destination directory
+                                                     for uploaded files
+
+  `CHUNK_SIZE`               `1 * 1024 * 1024` bytes Maximum size
+                                                     requested for each
+                                                     read chunk (1 MiB)
+
+  `MAX_FILE_SIZE`                `5 * 1024**3` bytes 5 GiB size limit
+                                                     checked during file
+                                                     writing and used for
+                                                     the application's
+                                                     request-size
+                                                     configuration
+
+  `REQUEST_LIMITER`          5 requests / 60 seconds Limits incoming
+                                                     upload requests
+  ------------------------------------------------------------------------
+
+To change a setting, edit its value in the script and restart the
+server.
+
+## Error handling
+
+Depending on the failure, the endpoint can return an HTTP error for
+cases such as:
+
+-   A request that does not use a multipart content type
+    (`415 Unsupported Media Type`).
+-   An invalid multipart request or missing uploaded files
+    (`400 Bad Request`).
+-   An invalid filename (`400 Bad Request`).
+-   A file exceeding the configured size limit
+    (`413 Request Entity Too Large`).
+-   A local disk write error (`500 Internal Server Error`).
+
+If a file fails during saving, the server attempts to remove the
+incomplete file. Cleanup itself can fail if the operating system
+prevents deletion.
+
+## Current scope and limitations
+
+-   **Local access by default:** the server binds to `127.0.0.1`, so it
+    is intended for use from the same machine.
+-   **No authentication or authorization:** anyone who can reach the
+    endpoint can attempt to upload files.
+-   **No TLS:** the server uses plain HTTP.
+-   **No resumable uploads:** interrupted transfers cannot be resumed
+    from a previous offset.
+-   **No separate chunk files or reassembly step:** chunks are written
+    sequentially into one destination file.
+-   **No concurrent chunk processing:** asynchronous I/O does not mean
+    that chunks from one file are written in parallel.
+-   **No permanent storage guarantee:** files are written to the local
+    filesystem; backups, retention, and disk-space management are
+    outside the current implementation.
+-   **Rate limiting is in-process:** the limiter is held in application
+    memory and is not a distributed limit shared across multiple server
+    processes.
+
+This project is designed as a **local development/testing utility**, not
+as a production-ready public upload service. Before exposing it to a
+network, add appropriate authentication, access controls, transport
+security, stricter validation, logging, and operational safeguards.
+
+## Project structure
+
+``` text
+project/
+├── Local_Upload_Server_File.py
+└── uploads/
+    └── <uuid>_<original_filename>
+```
+
+The `uploads/` directory is generated automatically at startup if
+needed.
+
+## License
+
+This project is licensed under the MIT License.
+See the [LICENSE](LICENSE.txt) file for details.
